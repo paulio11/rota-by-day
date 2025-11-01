@@ -2,42 +2,95 @@ import React, { useEffect, useState } from "react";
 import Papa from "papaparse";
 
 const Rota = () => {
-  const [data, setData] = useState([]);
+  const [employees, setEmployees] = useState([]);
   const [dayHeaders, setDayHeaders] = useState([]);
+  const [selectedEmp, setSelectedEmp] = useState("");
+  const [currentWeekStart, setCurrentWeekStart] = useState(getCurrentSunday());
 
+  // ---- Date utilities ----
+  function getCurrentSunday() {
+    const today = new Date();
+    const day = today.getDay(); // 0 = Sunday
+    const diff = today.getDate() - day;
+    const sunday = new Date(today.setDate(diff));
+    sunday.setHours(0, 0, 0, 0);
+    return sunday;
+  }
+
+  const formatDate = (date) => {
+    const d = String(date.getDate()).padStart(2, "0");
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const y = date.getFullYear();
+    return `${d}_${m}_${y}`;
+  };
+
+  // ---- Limits ----
+  const minWeekStart = new Date(2025, 9, 19); // 19 Oct 2025
+  const maxWeekStart = (() => {
+    const d = getCurrentSunday();
+    d.setDate(d.getDate() + 14); // 2 weeks ahead
+    return d;
+  })();
+
+  const rotaFileName = `data/Wall_Schedule_Classic_Review_6departments_(Week_${formatDate(
+    currentWeekStart
+  )}).csv`;
+
+  // ---- Load CSV when file changes ----
   useEffect(() => {
-    fetch("/rota1.csv")
-      .then((res) => res.text())
-      .then((text) => {
-        const result = Papa.parse(text, { header: false });
-        // Find header row with day names and dates
-        const headerRow = result.data.find((row) => row[0] === "Employee");
-        const dayCols = headerRow ? rowSlice(headerRow, 1, 8) : [];
+    const parseRota = async () => {
+      try {
+        const text = await fetch(rotaFileName).then((res) => {
+          if (!res.ok) throw new Error(`File not found: ${rotaFileName}`);
+          return res.text();
+        });
 
-        setDayHeaders(dayCols);
+        const { data } = Papa.parse(text, { header: false });
+        const headerRow = data.find((row) => row[0] === "Employee");
+        if (!headerRow) return;
 
-        // Remaining rows are employees
-        const employees = result.data
-          .filter((row) => row[0] && row[0] !== "Employee")
-          .map((row) => ({
-            name: row[0],
-            shifts: rowSlice(row, 1, 8),
-          }));
-        setData(employees);
-      });
-  }, []);
+        setDayHeaders(headerRow.slice(1, 8));
+        setEmployees(
+          data
+            .filter((row) => row[0] && row[0] !== "Employee")
+            .map((row) => ({
+              name: row[0],
+              shifts: row.slice(1, 8),
+            }))
+        );
+      } catch (err) {
+        console.error(err);
+        setEmployees([]);
+        setDayHeaders([]);
+      }
+    };
 
-  const rowSlice = (row, start, end) => row.slice(start, end);
+    parseRota();
+  }, [rotaFileName]);
 
-  const formatName = (rawName = "") => {
-    const cleaned = rawName.replace(/\s*\(\d+\)\s*$/, "").trim();
-    const parts = cleaned.split(/\s+/);
-    if (parts.length >= 2) {
-      const first = parts.slice(1).join(" ");
-      const last = parts[0];
-      return `${first} ${last}`;
-    }
-    return cleaned;
+  // ---- Navigation ----
+  const handlePrev = (e) => {
+    e.preventDefault();
+    const newDate = new Date(currentWeekStart);
+    newDate.setDate(currentWeekStart.getDate() - 7);
+    if (newDate >= minWeekStart) setCurrentWeekStart(newDate);
+  };
+
+  const handleNext = (e) => {
+    e.preventDefault();
+    const newDate = new Date(currentWeekStart);
+    newDate.setDate(currentWeekStart.getDate() + 7);
+    if (newDate <= maxWeekStart) setCurrentWeekStart(newDate);
+  };
+
+  const prevDisabled = currentWeekStart.getTime() <= minWeekStart.getTime();
+  const nextDisabled = currentWeekStart.getTime() >= maxWeekStart.getTime();
+
+  // ---- Helper functions ----
+  const formatName = (raw = "") => {
+    const cleaned = raw.replace(/\s*\(\d+\)\s*$/, "").trim();
+    const [last, ...rest] = cleaned.split(/\s+/);
+    return rest.length ? `${rest.join(" ")} ${last}` : cleaned;
   };
 
   const extractShiftTime = (text = "") => {
@@ -45,55 +98,82 @@ const Rota = () => {
       /Whole Shift:(\d{1,2}):?(\d{0,2})?\s*-\s*(\d{1,2}):?(\d{0,2})?/
     );
     if (!match) return "";
-    const [, startH, startM, endH, endM] = match;
-    const pad = (num) => num.toString().padStart(2, "0");
-    const start = `${pad(startH)}:${pad(startM || 0)}`;
-    const end = `${pad(endH)}:${pad(endM || 0)}`;
-    return `${start}–${end}`;
+    const [, sh, sm = "0", eh, em = "0"] = match;
+    const pad = (n) => n.toString().padStart(2, "0");
+    return `${pad(sh)}:${pad(sm)}–${pad(eh)}:${pad(em)}`;
   };
 
-  const timeToMinutes = (timeStr) => {
-    const [h, m] = timeStr.split(":").map(Number);
+  const timeToMinutes = (t) => {
+    const [h, m] = t.split(":").map(Number);
     return h * 60 + m;
   };
 
+  // ---- Render ----
   return (
     <>
-      <div>
-        {dayHeaders.map((dayLabel, dayIndex) => {
-          const employeesWithShift = data
-            .map((emp) => {
-              const rawShift = emp.shifts[dayIndex] || "";
-              const shift = extractShiftTime(rawShift);
-              if (!shift) return null;
-              return {
-                name: formatName(emp.name),
-                shift,
-                startMinutes: timeToMinutes(shift.split("–")[0]),
-              };
-            })
-            .filter(Boolean)
-            .sort((a, b) => a.startMinutes - b.startMinutes);
+      <form onSubmit={(e) => e.preventDefault()}>
+        <button onClick={handlePrev} disabled={prevDisabled}>
+          Prev
+        </button>
+        <span style={{ margin: "0 1rem" }}>
+          Week starting {currentWeekStart.toLocaleDateString()}
+        </span>
+        <button onClick={handleNext} disabled={nextDisabled}>
+          Next
+        </button>
+      </form>
 
-          if (employeesWithShift.length === 0) return null;
+      <form>
+        <select
+          onChange={(e) => setSelectedEmp(e.target.value)}
+          value={selectedEmp}
+        >
+          <option value="">Everyone</option>
+          {employees.slice(2).map((emp, i) => {
+            const name = formatName(emp.name);
+            return (
+              <option key={i} value={name}>
+                {name}
+              </option>
+            );
+          })}
+        </select>
+      </form>
 
-          return (
-            <div key={dayLabel} style={{ marginBottom: "2rem" }}>
-              <h2>{dayLabel}</h2>
-              <table>
-                <tbody>
-                  {employeesWithShift.map((emp, i) => (
-                    <tr key={i}>
-                      <td>{emp.name}</td>
-                      <td>{emp.shift}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        })}
-      </div>
+      {dayHeaders.map((day, dayIndex) => {
+        const shifts = employees
+          .filter((e) => !selectedEmp || formatName(e.name) === selectedEmp)
+          .map((e) => {
+            const shift = extractShiftTime(e.shifts[dayIndex]);
+            return shift
+              ? {
+                  name: formatName(e.name),
+                  shift,
+                  start: timeToMinutes(shift.split("–")[0]),
+                }
+              : null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.start - b.start);
+
+        if (!shifts.length) return null;
+
+        return (
+          <div key={day} style={{ marginBottom: "2rem" }}>
+            <h2>{day}</h2>
+            <table>
+              <tbody>
+                {shifts.map(({ name, shift }, i) => (
+                  <tr key={i}>
+                    <td>{name}</td>
+                    <td>{shift}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
     </>
   );
 };
